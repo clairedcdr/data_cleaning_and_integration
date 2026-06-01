@@ -1,0 +1,299 @@
+---
+title: "Data Cleaning and Integration in Official Statistics"
+subtitle: "Part 1 Project - Ilaria Bombelli"
+author: "Claire du Campe de Rosamel"
+format:
+  beamer:
+    theme: Madrid
+    fontsize: 9pt
+---
+
+# Data and Preparation
+
+The dataset used in this project comes from NHANES. We restrict the sample to :
+
+-   adults aged over 20
+-   from the 2011–2012 wave
+-   a subset of variables : `ID, Age, AgeDecade, Gender, Education, MaritalStatus, Race1, nPregnancies, nBabies, Weight, Height, BMI, Pulse, TotChol, Testosterone, PhysActive`
+
+The objective is to clean the data by identifying inconsistencies, applying validation rules, imputing missing values, and ensuring overall coherence.
+
+We begin by filtering the data, removing duplicates, and selecting relevant variables. We also convert factor variables into characters to avoid issues during processing.
+
+```{r}
+#| include: false
+
+library(dplyr)
+library(NHANES)
+library(tidyr)
+library(validate)
+library(VIM)
+library(deductive)
+library(errorlocate)
+library(ggplot2)
+
+data(NHANES)
+
+df_project <- NHANES %>%
+  filter(SurveyYr == "2011_12", Age >= 20) %>%
+  distinct(ID, .keep_all = TRUE) %>%
+  select(ID, Age, AgeDecade, Gender, Education, MaritalStatus, Race1, nPregnancies, nBabies, Weight, Height, BMI, Pulse, TotChol, Testosterone, PhysActive) %>%
+  mutate(across(where(is.factor), as.character))
+```
+
+# Validation Rules {.allowframebreaks}
+
+We define a set of validation rules using the `validate` package. These rules allow us to check logical consistency between variables, plausible ranges, and structural relationships. We then evaluate how many observations violate these rules.
+
+We determine some threshold for two variables : 
+
+\footnotesize
+```{r}
+#| echo: true
+#| tidy: true
+#| tidy.opts: list(width.cutoff = 40)
+
+# Cholesterol Threshold
+res_chol <- summary(df_project$TotChol)
+up_chol <- res_chol[["3rd Qu."]] + 1.5 * IQR(df_project$TotChol, na.rm=TRUE)
+lo_chol <- res_chol[["1st Qu."]] - 1.5 * IQR(df_project$TotChol, na.rm=TRUE)
+
+# Pulse Threshold
+res_pulse <- summary(df_project$Pulse)
+up_pulse <- res_pulse[["3rd Qu."]] + 1.5 * IQR(df_project$Pulse, na.rm=TRUE)
+lo_pulse <- res_pulse[["1st Qu."]] - 1.5 * IQR(df_project$Pulse, na.rm=TRUE)
+```
+
+\normalsize
+\framebreak
+
+We then set our rules : 
+
+\footnotesize
+```{r}
+#| echo: true
+#| tidy: true
+#| tidy.opts: list(width.cutoff = 40)
+
+rules <- validator(
+  age = Age >= 20 & Age <= 80,
+  age_decade = is.na(Age) | !is.na(AgeDecade),
+  marital_status = !is.na(MaritalStatus),
+  education = !is.na(Education),
+  physical_activity = !is.na(PhysActive),
+  male_not_pregnant = Gender != "male" | (is.na(nPregnancies) & is.na(nBabies)),
+  female_pregnant = Gender != "female" | (nPregnancies >= nBabies),
+  testosterone = Gender != "male" | Testosterone > 150,
+  bmi = abs(BMI - (Weight / (Height/100)^2)) < 0.1,
+  pulse = Pulse > lo_pulse & Pulse < up_pulse,
+  cholesterol = TotChol > lo_chol & TotChol < up_chol
+)
+
+```
+
+# Checking the dataset
+
+
+```{r}
+#| echo: false
+
+rules <- validatetools::remove_redundancy(rules)
+
+cf <- confront(df_project, rules)
+check <- summary(cf)
+print(check[1:7])
+
+```
+
+# First corrections : rules 2, 3, 4 {.allowframebreaks}
+
+**These rules are about missing values in `AgeDecade` and 2 errors in `MaritalStatus` and `Education`.**
+
+$\rightarrow$ Individuals aged 80 have a missing age decade, which can be reconstructed. 
+
+$\rightarrow$ We use hot-deck imputation to fill missing values in categorical variables. The imputation relies on similar individuals defined by demographic characteristics.
+
+```{r}
+#| echo: true
+
+df_project <- df_project %>% 
+  mutate(
+    AgeDecade_imp = ifelse(Age == 80 & is.na(AgeDecade), TRUE, FALSE),
+    AgeDecade = ifelse(AgeDecade_imp == TRUE, "70+", AgeDecade) 
+  )
+
+df_project <- hotdeck(
+  df_project,
+  variable = c("MaritalStatus", "Education"),
+  domain_var = c("AgeDecade", "Gender", "Race1"),
+  impNA = TRUE 
+)
+
+```
+
+
+
+```{r}
+#| echo: false
+#| fig-align: "center"
+#| out-width: "80%"
+#| out-height: "70%"
+
+aggr(df_project[, c("MaritalStatus", "Education", "MaritalStatus_imp", "Education_imp", "AgeDecade", "AgeDecade_imp")],
+     col = c('skyblue', 'tomato', 'green'), 
+     delimiter = "_imp", 
+     numbers = TRUE, prop = FALSE,
+     cex.axis = 0.8, main = "2. Après Hot-deck Démographie")
+
+```
+
+# Bigger corrections : rule 9
+
+**Rule 9 concerns `BMI` variable, which has 24 missing variables.** They are all due to missing variables in `Weight` and `Height`.
+
+$\rightarrow$ We first impute `Weight` and `Height` using hot-deck, based on age and gender. 
+
+$\rightarrow$ Then we compute `BMI` deterministically when it is missing.
+
+```{r}
+#| echo: true
+
+df_project <- hotdeck(
+  df_project,
+  variable = c("Weight", "Height"),
+  domain_var = c("AgeDecade", "Gender"),
+  impNA = TRUE
+)
+
+df_project <- df_project %>%
+  mutate(
+    BMI_imp = if_else(is.na(BMI), TRUE, FALSE),
+    BMI = if_else(BMI_imp == TRUE, Weight / (Height/100)^2, BMI)
+  )
+
+```
+
+# Health Variables : rules 8, 10, 11 {.allowframebreaks}
+
+We have identified implausible values such as abnormal pulse or unrealistic cholesterol levels, thanks to our thresholds. **These rules have both errors and missing values.**
+
+```{r}
+#| echo: false
+#| fig-align: "center"
+#| out-width: "80%"
+#| out-height: "70%"
+
+df_project %>%
+  ggplot(aes(x = Age, y = Pulse, color = Gender)) +
+  geom_point(alpha = 0.6) +
+  geom_hline(yintercept = lo_pulse, linetype = "dashed", color = "red") + 
+  geom_hline(yintercept = up_pulse, linetype = "dashed", color = "red") + 
+  labs(title = "Pulse by gender",
+       x = "Age",
+       y = "Pulse") + 
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+```
+
+
+
+We directly correct them and impute the errors and missing variables with `knn`.
+
+```{r}
+#| echo: true
+#| tidy: true
+#| tidy.opts: list(width.cutoff = 40)
+
+df_project <- df_project %>% 
+  mutate(Testosterone = ifelse(Gender == "male" & Testosterone <= 150, 
+                               NA_real_, Testosterone), 
+         Pulse = ifelse(!is.na(Pulse) & 
+                          (Pulse <= lo_pulse | Pulse >= up_pulse), 
+                        NA_real_, Pulse),
+         TotChol = ifelse(!is.na(TotChol) & 
+                            (TotChol <= lo_chol | TotChol >= up_chol), 
+                          NA_real_, TotChol))
+
+df_project <- kNN(
+  df_project, 
+  variable = c("Pulse", "TotChol", "Testosterone"),
+  dist_var = c("Age", "Gender", "Weight", "Height"), 
+  k = 5,
+  imp_var = TRUE 
+)
+```
+
+\framebreak
+We then check our corrections.
+
+```{r}
+
+cf <- confront(df_project, rules)
+check <- summary(cf)
+print(check[1:7])
+
+```
+
+Only one rules left to fix. 
+
+# Reproduction Variable : rule 7 {.allowframebreaks}
+
+Reproduction variables require specific constraints. Men cannot have pregnancies, and the number of babies cannot exceed the number of pregnancies. We first enforce these constraints, then re-impute missing or inconsistent values.
+
+```{r}
+#| echo: true
+
+df_project <- kNN(
+  df_project, 
+  variable = c("nPregnancies", "nBabies"),
+  dist_var = c("Gender", "Age", "Race1", "Education", "BMI"), 
+  k = 5,
+  imp_var = TRUE
+)
+```
+
+\framebreak
+But it also imputed pregnancies for men and some women have a number of babies superior to the number of pregnancies. 
+```{r}
+#| echo: false
+
+cf <- confront(df_project, rules)
+check <- summary(cf)
+print(check[1:7])
+```
+
+We hence force the men to have `NA` and make the imputation find similar duo for `nPregnancies` and `nBabies`. 
+
+```{r}
+#| echo: false
+
+df_project <- df_project %>% 
+  mutate(
+    nPregnancies = ifelse(Gender == "male", NA_integer_, nPregnancies),
+    nBabies      = ifelse(Gender == "male", NA_integer_, nBabies),
+    nPregnancies = ifelse(Gender == "female" & nPregnancies < nBabies, NA_integer_, nPregnancies),
+    nBabies      = ifelse(Gender == "female" & is.na(nPregnancies), NA_integer_, nBabies)
+  )
+
+df_project <- hotdeck(
+  df_project,
+  variable = c("nBabies", "nPregnancies"),
+  domain_var = c("AgeDecade", "Gender", "Race1"),
+  impNA = TRUE 
+)
+```
+
+# Final Checks
+
+At the end of the process, we verify that all validation rules are satisfied and that no missing values remain.
+
+```{r}
+cf <- confront(df_project, rules)
+check <- summary(cf)
+print(check[1:7])
+```
+
+\centering
+**The dataset is now fully cleaned and internally consistent.**
+

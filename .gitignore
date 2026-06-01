@@ -1,0 +1,14 @@
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+Project.Rproj
+
+# Exclure les dossiers de dépendances générés par Quarto
+*_files/
+. Quarto/
+
+# Optionnel : Exclure les slides finales au format HTML ou PDF
+# (Enlevez ces lignes si vous voulez absolument partager le rendu final sur Git)
+*.html
+*.pdf

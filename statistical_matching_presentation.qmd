@@ -1,0 +1,475 @@
+---
+title: "Data Cleaning and Integration in Official Statistics"
+subtitle: "Part 2 Project - Donatella Firmani"
+author: "Claire du Campe de Rosamel"
+format:
+  beamer:
+    aspectratio: 169
+    theme: Madrid
+    colortheme: default
+    fonttheme: professionalfonts
+execute:
+  echo: false
+  warning: false
+  message: false
+---
+
+```{r setup}
+library(palmerpenguins)
+library(dplyr)
+library(tidyr)
+library(purrr)
+library(ggplot2)
+library(knitr)
+
+set.seed(123)
+
+penguins_clean <- penguins %>%
+  select(
+    species,
+    island,
+    sex,
+    flipper_length_mm,
+    body_mass_g,
+    bill_length_mm
+  ) %>%
+  na.omit()
+
+n <- nrow(penguins_clean)
+
+sample_A_id <- sample(
+  1:n,
+  size = floor(n / 2),
+  replace = FALSE
+)
+
+A_full <- penguins_clean[sample_A_id, ]
+B_full <- penguins_clean[-sample_A_id, ]
+
+A <- A_full %>%
+  select(
+    species,
+    island,
+    sex,
+    flipper_length_mm,
+    body_mass_g
+  )
+
+B <- B_full %>%
+  select(
+    species,
+    island,
+    sex,
+    flipper_length_mm,
+    bill_length_mm
+  )
+
+A_true_bill <- A_full$bill_length_mm
+```
+
+```{r functions}
+hot_deck_match <- function(recipient_file, donor_file, spec = "rich") {
+  
+  imputed_values <- numeric(nrow(recipient_file))
+  
+  for (i in 1:nrow(recipient_file)) {
+    
+    recipient <- recipient_file[i, ]
+    
+    if (spec == "rich") {
+      possible_donors <- donor_file %>%
+        filter(
+          species == recipient$species,
+          sex == recipient$sex,
+          island == recipient$island
+        )
+    }
+    
+    if (spec == "poor") {
+      possible_donors <- donor_file %>%
+        filter(
+          species == recipient$species
+        )
+    }
+    
+    if (nrow(possible_donors) == 0) {
+      possible_donors <- donor_file %>%
+        filter(species == recipient$species)
+    }
+    
+    if (nrow(possible_donors) == 0) {
+      possible_donors <- donor_file
+    }
+    
+    if (spec == "rich") {
+      best_donor <- possible_donors %>%
+        mutate(
+          distance = abs(flipper_length_mm - recipient$flipper_length_mm)
+        ) %>%
+        slice_min(distance, n = 1, with_ties = TRUE) %>%
+        slice_sample(n = 1)
+    }
+    
+    if (spec == "poor") {
+      best_donor <- possible_donors %>%
+        slice_sample(n = 1)
+    }
+    
+    imputed_values[i] <- best_donor$bill_length_mm
+  }
+  
+  recipient_file %>%
+    mutate(bill_length_imputed = imputed_values)
+}
+
+evaluate_matching <- function(A_file, B_file, A_true_values, spec = "rich") {
+  
+  matched_data <- hot_deck_match(A_file, B_file, spec = spec) %>%
+    mutate(
+      bill_length_true = A_true_values,
+      error = bill_length_imputed - bill_length_true
+    )
+  
+  true_cor <- cor(
+    matched_data$body_mass_g,
+    matched_data$bill_length_true,
+    use = "complete.obs"
+  )
+  
+  synthetic_cor <- cor(
+    matched_data$body_mass_g,
+    matched_data$bill_length_imputed,
+    use = "complete.obs"
+  )
+  
+  tibble(
+    specification = spec,
+    rmse = sqrt(mean(matched_data$error^2, na.rm = TRUE)),
+    mae = mean(abs(matched_data$error), na.rm = TRUE),
+    true_correlation = true_cor,
+    synthetic_correlation = synthetic_cor,
+    correlation_error = abs(true_cor - synthetic_cor)
+  )
+}
+
+A_matched <- hot_deck_match(A, B, spec = "rich") %>%
+  mutate(
+    bill_length_true = A_true_bill,
+    error = bill_length_imputed - bill_length_true
+  )
+
+baseline_results <- evaluate_matching(
+  A_file = A,
+  B_file = B,
+  A_true_values = A_true_bill,
+  spec = "rich"
+)
+```
+
+## Research question
+
+This project applies **statistical matching** to the Palmer Penguins dataset.
+
+The objective is to reconstruct missing joint information between:
+
+- **body mass**, observed only in file A;
+- **bill length**, observed only in file B.
+
+\vspace{0.3cm}
+
+Main question:
+
+$$
+\text{Can hot deck matching recover the relationship between body mass and bill length?}
+$$
+
+## Building a statistical matching problem
+
+The original dataset is complete.
+
+To reproduce a statistical matching setting, it is split in two ways:
+
+- **horizontally:** penguins are divided into two disjoint files;
+- **vertically:** some variables are kept only in one file.
+
+```{r}
+tibble(
+  File = c("A", "B"),
+  Common_variables = c(
+    "species, island, sex, flipper length",
+    "species, island, sex, flipper length"
+  ),
+  Observed_specific_variable = c("body mass", "bill length"),
+  Hidden_variable = c("bill length", "body mass")
+) %>%
+  kable()
+```
+
+## Statistical matching design
+
+In file A, bill length is treated as missing.
+
+In file B, bill length is observed and can be used for donation.
+
+\vspace{0.2cm}
+
+For each penguin in A:
+
+1. search for similar penguins in B;
+2. select one donor;
+3. assign the donor's bill length to the recipient penguin.
+
+\vspace{0.2cm}
+
+The output is a synthetic version of file A:
+
+$$
+X + Y + \widehat{Z}
+$$
+
+where X are common variables, Y is body mass, and $\widehat{Z}$ is imputed bill length.
+
+## Baseline method: rich distance hot deck
+
+The main procedure is the most informative specification.
+
+For each recipient in A, donors are first restricted to the same:
+
+- species;
+- sex;
+- island.
+
+Among these possible donors, the selected donor is the one with the closest flipper length.
+
+$$
+d(i,j) = |flipper\_length_i - flipper\_length_j|
+$$
+
+This is the **baseline statistical matching procedure**.
+
+## Code excerpt: main matching rule
+
+```{r, echo=TRUE, eval=FALSE, fig.align="center"}
+best_donor <- donor_file %>%
+  filter(
+    species == recipient$species,
+    sex == recipient$sex,
+    island == recipient$island
+  ) %>%
+  mutate(
+    distance = abs(flipper_length_mm - recipient$flipper_length_mm)
+  ) %>%
+  slice_min(distance, n = 1, with_ties = TRUE) %>%
+  slice_sample(n = 1)
+```
+
+\vspace{0.2cm}
+
+This code is the core of the rich distance hot deck procedure.
+
+## Baseline evaluation
+
+Because the experiment starts from a complete dataset, the hidden values are known.
+
+This allows a direct evaluation of the imputation.
+
+```{r}
+baseline_results %>%
+  mutate(across(where(is.numeric), ~ round(.x, 3))) %>%
+  kable()
+```
+
+The baseline is evaluated using individual errors and preservation of the relationship between Y and Z.
+
+## Distribution of true and imputed bill length
+
+```{r, out.height="70%", out.width="80%", fig.align="center"}
+A_matched %>%
+  select(bill_length_true, bill_length_imputed) %>%
+  pivot_longer(
+    cols = everything(),
+    names_to = "variable",
+    values_to = "bill_length_mm"
+  ) %>%
+  ggplot(aes(x = bill_length_mm, linetype = variable)) +
+  geom_density(linewidth = 1) +
+  labs(
+    title = "True vs imputed distribution of bill length",
+    x = "Bill length (mm)",
+    y = "Density",
+    linetype = ""
+  ) +
+  theme_minimal()
+```
+
+## Reconstructed relationship between Y and Z
+
+```{r, out.height="70%", out.width="80%", fig.align="center"}
+A_matched %>%
+  select(body_mass_g, bill_length_true, bill_length_imputed) %>%
+  pivot_longer(
+    cols = c(bill_length_true, bill_length_imputed),
+    names_to = "variable",
+    values_to = "bill_length_mm"
+  ) %>%
+  ggplot(aes(x = body_mass_g, y = bill_length_mm)) +
+  geom_point(alpha = 0.6) +
+  geom_smooth(method = "lm", se = FALSE) +
+  facet_wrap(~ variable) +
+  labs(
+    title = "True vs synthetic relationship",
+    x = "Body mass (g)",
+    y = "Bill length (mm)"
+  ) +
+  theme_minimal()
+```
+
+## Sensitivity analysis
+
+After applying the baseline procedure, we test whether matching quality depends on:
+
+- the variables used to define similarity;
+- the available sample size.
+
+\vspace{0.2cm}
+
+Two specifications are compared:
+
+```{r}
+tibble(
+  Specification = c("Poor", "Rich"),
+  Rule = c(
+    "Random donor with the same species",
+    "Same species, sex and island, then nearest flipper length"
+  )
+) %>%
+  kable()
+```
+
+## Fast simulation design
+
+```{r simulation}
+run_one_simulation <- function(sample_size, specification) {
+  
+  sampled_data <- penguins_clean %>%
+    slice_sample(n = sample_size)
+  
+  sample_A_id <- sample(
+    1:nrow(sampled_data),
+    size = floor(sample_size / 2),
+    replace = FALSE
+  )
+  
+  A_full_sim <- sampled_data[sample_A_id, ]
+  B_full_sim <- sampled_data[-sample_A_id, ]
+  
+  A_sim <- A_full_sim %>%
+    select(
+      species,
+      island,
+      sex,
+      flipper_length_mm,
+      body_mass_g
+    )
+  
+  B_sim <- B_full_sim %>%
+    select(
+      species,
+      island,
+      sex,
+      flipper_length_mm,
+      bill_length_mm
+    )
+  
+  evaluate_matching(
+    A_file = A_sim,
+    B_file = B_sim,
+    A_true_values = A_full_sim$bill_length_mm,
+    spec = specification
+  ) %>%
+    select(rmse, mae, correlation_error)
+}
+
+simulation_results <- expand_grid(
+  sample_size = c(50, 100, 150, 250, 300),
+  repetition = 1:20,
+  specification = c("poor", "rich")
+) %>%
+  mutate(
+    result = pmap(
+      list(sample_size, specification),
+      ~ run_one_simulation(
+        sample_size = ..1,
+        specification = ..2
+      )
+    )
+  ) %>%
+  unnest(result)
+
+simulation_summary <- simulation_results %>%
+  group_by(sample_size, specification) %>%
+  summarise(
+    mean_rmse = mean(rmse, na.rm = TRUE),
+    mean_mae = mean(mae, na.rm = TRUE),
+    mean_correlation_error = mean(correlation_error, na.rm = TRUE),
+    .groups = "drop"
+  )
+```
+
+```{r, echo=TRUE, eval=FALSE}
+simulation_results <- expand_grid(
+  sample_size = c(50, 100, 150, 250, 300),
+  repetition = 1:20,
+  specification = c("poor", "rich")
+)
+```
+
+The simulation is deliberately limited to keep computation time reasonable.
+
+## Matching quality and sample size
+
+```{r, out.height="70%", out.width="80%", fig.align="center"}
+ggplot(
+  simulation_summary,
+  aes(x = sample_size, y = mean_rmse, linetype = specification)
+) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  labs(
+    title = "Matching quality by sample size",
+    x = "Total sample size before splitting into A and B",
+    y = "Average RMSE",
+    linetype = "Specification"
+  ) +
+  theme_minimal()
+```
+
+
+## Main findings
+
+The baseline rich distance hot deck uses the most informative available common variables.
+
+The evaluation compares the synthetic information to the true hidden values.
+
+The sensitivity analysis shows whether results depend on matching assumptions and donor file size.
+
+\vspace{0.2cm}
+
+Overall, hot deck matching can reconstruct part of the missing joint information, but its quality depends on the informativeness of X.
+
+## Conclusion
+
+This project illustrates a micro non-parametric statistical matching approach.
+
+The Palmer Penguins dataset is useful because the true hidden values are known before the artificial split.
+
+The main limitation is that, in a real application, the true missing values would not be observed.
+
+\vspace{0.2cm}
+
+The method is therefore useful, but it relies on a strong practical condition:
+
+$$
+X \text{ must be informative enough about both } Y \text{ and } Z.
+$$
+
