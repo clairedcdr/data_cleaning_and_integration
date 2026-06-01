@@ -151,18 +151,19 @@ aggr(df_project[, c("MaritalStatus", "Education", "MaritalStatus_imp", "Educatio
 
 **Rule 9 concerns `BMI` variable, which has 24 missing variables.** They are all due to missing variables in `Weight` and `Height`.
 
-$\rightarrow$ We first impute `Weight` and `Height` using hot-deck, based on age and gender. 
+$\rightarrow$ We first impute `Weight` and `Height` using `kNN`, based on age, gender and race. 
 
 $\rightarrow$ Then we compute `BMI` deterministically when it is missing.
 
 ```{r}
 #| echo: true
 
-df_project <- hotdeck(
+df_project <- kNN(
   df_project,
   variable = c("Weight", "Height"),
-  domain_var = c("AgeDecade", "Gender"),
-  impNA = TRUE
+  dist_var = c("Age", "Gender", "Race1"),
+  k = 5,
+  imp_var = TRUE
 )
 
 df_project <- df_project %>%
@@ -198,7 +199,7 @@ df_project %>%
 
 
 
-We directly correct them and impute the errors and missing variables with `knn`.
+We directly correct them and impute the errors and missing variables with `kNN`.
 
 ```{r}
 #| echo: true
@@ -242,19 +243,38 @@ Only one rules left to fix.
 Reproduction variables require specific constraints. Men cannot have pregnancies, and the number of babies cannot exceed the number of pregnancies. We first enforce these constraints, then re-impute missing or inconsistent values.
 
 ```{r}
+#| echo: false
+
+df_project <- df_project %>%
+  mutate(
+    nPregnancies = ifelse(Gender == "male", NA_integer_, nPregnancies),
+    nBabies = ifelse(Gender == "male", NA_integer_, nBabies),
+    nPregnancies = ifelse(
+      Gender == "female" & !is.na(nPregnancies) & !is.na(nBabies) & nPregnancies < nBabies,
+      NA_integer_,
+      nPregnancies
+    ),
+    nBabies = ifelse(
+      Gender == "female" & is.na(nPregnancies),
+      NA_integer_,
+      nBabies
+    )
+  )
+```
+
+```{r}
 #| echo: true
 
-df_project <- kNN(
-  df_project, 
-  variable = c("nPregnancies", "nBabies"),
-  dist_var = c("Gender", "Age", "Race1", "Education", "BMI"), 
-  k = 5,
-  imp_var = TRUE
+df_project <- hotdeck(
+  df_project,
+  variable = c("nBabies", "nPregnancies"),
+  domain_var = c("AgeDecade", "Gender", "Race1"),
+  impNA = TRUE
 )
 ```
 
 \framebreak
-But it also imputed pregnancies for men and some women have a number of babies superior to the number of pregnancies. 
+Some women have a number of babies superior to the number of pregnancies, and a women did not find a matching donnor. 
 ```{r}
 #| echo: false
 
@@ -263,26 +283,28 @@ check <- summary(cf)
 print(check[1:7])
 ```
 
-We hence force the men to have `NA` and make the imputation find similar duo for `nPregnancies` and `nBabies`. 
+We therefore impute `nPregnancies` and `nBabies` from similar donor records, using broader imputation classes to avoid cells with too few donors. We only use `Gender` and `AgeDecade`. 
 
 ```{r}
 #| echo: false
 
-df_project <- df_project %>% 
-  mutate(
-    nPregnancies = ifelse(Gender == "male", NA_integer_, nPregnancies),
-    nBabies      = ifelse(Gender == "male", NA_integer_, nBabies),
-    nPregnancies = ifelse(Gender == "female" & nPregnancies < nBabies, NA_integer_, nPregnancies),
-    nBabies      = ifelse(Gender == "female" & is.na(nPregnancies), NA_integer_, nBabies)
-  )
+df_project <- df_project %>%
+  mutate(nPregnancies = ifelse(Gender == "female" & nPregnancies < nBabies, 
+                               NA_integer_, 
+                               nPregnancies),
+         nBabies = ifelse(Gender == "female" & is.na(nPregnancies),
+                          NA_integer_,
+                          nBabies))
+
 
 df_project <- hotdeck(
   df_project,
   variable = c("nBabies", "nPregnancies"),
-  domain_var = c("AgeDecade", "Gender", "Race1"),
-  impNA = TRUE 
+  domain_var = c("AgeDecade", "Gender"),
+  impNA = TRUE
 )
 ```
+
 
 # Final Checks
 

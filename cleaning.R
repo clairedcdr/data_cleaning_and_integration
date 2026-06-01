@@ -174,14 +174,15 @@ aggr(
 # 6. Impute anthropometric variables and reconstruct BMI
 # ------------------------------------------------------------
 
-# Missing weight and height values are imputed using hot deck imputation.
-# Donor classes are defined using age decade and gender.
+# Weight and height are continuous variables.
+# We impute them with kNN using demographic and biological predictors.
 
-df_project <- hotdeck(
+df_project <- kNN(
   df_project,
   variable = c("Weight", "Height"),
-  domain_var = c("AgeDecade", "Gender"),
-  impNA = TRUE
+  dist_var = c("Age", "Gender", "Race1"),
+  k = 5,
+  imp_var = TRUE
 )
 
 # If BMI is missing, it is reconstructed from weight and height.
@@ -252,47 +253,48 @@ cf <- confront(df_project, rules)
 check <- summary(cf)
 print(check[1:7])
 
-# ------------------------------------------------------------
-# 9. First imputation attempt for pregnancy-related variables
-# ------------------------------------------------------------
-
-# Pregnancy-related variables are imputed using kNN.
-# Predictors include gender, age, race, education and BMI.
-
-df_project <- kNN(
-  df_project,
-  variable = c("nPregnancies", "nBabies"),
-  dist_var = c("Gender", "Age", "Race1", "Education", "BMI"),
-  k = 5,
-  imp_var = TRUE
-)
-
-# Re-check validation rules after the first pregnancy imputation
-cf <- confront(df_project, rules)
-check <- summary(cf)
-print(check[1:7])
 
 # ------------------------------------------------------------
-# 10. Correct logical inconsistencies in pregnancy variables
+# 9. Reproduction variables
 # ------------------------------------------------------------
 
-# Men should not have pregnancy or baby counts.
-# For women, the number of pregnancies should not be lower
-# than the number of babies.
-# Inconsistent values are set back to missing before re-imputation.
+# Pregnancy-related variables are structurally non-applicable for men.
+# We therefore force them to NA before imputation.
+# For women, inconsistent records where the number of babies exceeds
+# the number of pregnancies are also set to NA.
 
 df_project <- df_project %>%
   mutate(
+    nPregnancies = ifelse(Gender == "male", NA_integer_, nPregnancies),
+    nBabies = ifelse(Gender == "male", NA_integer_, nBabies),
     nPregnancies = ifelse(
-      Gender == "male",
+      Gender == "female" & !is.na(nPregnancies) & !is.na(nBabies) & nPregnancies < nBabies,
       NA_integer_,
       nPregnancies
     ),
     nBabies = ifelse(
-      Gender == "male",
+      Gender == "female" & is.na(nPregnancies),
       NA_integer_,
       nBabies
-    ),
+    )
+  )
+
+# We impute pregnancy-related variables using hot deck within demographic groups.
+# Hot deck is preferred here because it preserves observed integer values
+# and is easier to control for logically constrained variables.
+
+df_project <- hotdeck(
+  df_project,
+  variable = c("nBabies", "nPregnancies"),
+  domain_var = c("AgeDecade", "Gender", "Race1"),
+  impNA = TRUE
+)
+
+# For women, the number of pregnancies should not be lower than the number of babies.
+# Inconsistent values are set back to missing before re-imputation.
+
+df_project <- df_project %>%
+  mutate(
     nPregnancies = ifelse(
       Gender == "female" & nPregnancies < nBabies,
       NA_integer_,
@@ -306,17 +308,18 @@ df_project <- df_project %>%
   )
 
 # Re-impute pregnancy-related variables with hot deck imputation.
-# Donor classes are defined using age decade, gender and race.
+# Donor classes are defined using age decade and gender only.
 
 df_project <- hotdeck(
   df_project,
   variable = c("nBabies", "nPregnancies"),
-  domain_var = c("AgeDecade", "Gender", "Race1"),
+  domain_var = c("AgeDecade", "Gender"),
   impNA = TRUE
 )
 
+
 # ------------------------------------------------------------
-# 11. Final validation check
+# 10. Final validation check
 # ------------------------------------------------------------
 
 # The final confrontation checks whether the cleaned dataset
