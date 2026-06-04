@@ -56,7 +56,6 @@ We determine some threshold for two variables :
 # Cholesterol Threshold
 res_chol <- summary(df_project$TotChol)
 up_chol <- res_chol[["3rd Qu."]] + 1.5 * IQR(df_project$TotChol, na.rm=TRUE)
-lo_chol <- res_chol[["1st Qu."]] - 1.5 * IQR(df_project$TotChol, na.rm=TRUE)
 
 # Pulse Threshold
 res_pulse <- summary(df_project$Pulse)
@@ -86,7 +85,7 @@ rules <- validator(
   testosterone = Gender != "male" | Testosterone > 150,
   bmi = abs(BMI - (Weight / (Height/100)^2)) < 0.1,
   pulse = Pulse > lo_pulse & Pulse < up_pulse,
-  cholesterol = TotChol > lo_chol & TotChol < up_chol
+  cholesterol = TotChol < up_chol
 )
 
 ```
@@ -176,13 +175,13 @@ df_project <- df_project %>%
 
 # Health Variables : rules 8, 10, 11 {.allowframebreaks}
 
-We have identified implausible values such as abnormal pulse or unrealistic cholesterol levels, thanks to our thresholds. **These rules have both errors and missing values.**
+We use IQR-based thresholds to flag unusually high or low values for pulse and cholesterol. Since these values are extreme and cannot be clinically validated here, we treat them as suspicious values and set them to missing before imputation.
 
 ```{r}
 #| echo: false
 #| fig-align: "center"
-#| out-width: "80%"
-#| out-height: "70%"
+#| out-width: "75%"
+#| out-height: "65%"
 
 df_project %>%
   ggplot(aes(x = Age, y = Pulse, color = Gender)) +
@@ -213,7 +212,7 @@ df_project <- df_project %>%
                           (Pulse <= lo_pulse | Pulse >= up_pulse), 
                         NA_real_, Pulse),
          TotChol = ifelse(!is.na(TotChol) & 
-                            (TotChol <= lo_chol | TotChol >= up_chol), 
+                            TotChol >= up_chol, 
                           NA_real_, TotChol))
 
 df_project <- kNN(
